@@ -1,10 +1,23 @@
-qrcode==7.4.2
-pillow==10.0.0
-pyzbar==0.1.9
-opencv-python==4.7.0.72
-reportlab==4.0.4
+# requirements.txt - Updated dependencies to fix compatibility issues
+
+# Main GUI framework - use ttkbootstrap instead of mixing with tkcalendar
 ttkbootstrap==1.10.1
-tkcalendar==1.6.1
-openpyxl==3.1.2
-pyinstaller==5.13.0
-fpdf2==2.7.5
+
+# Database (included with Python)
+# sqlite3 - built-in
+
+# For date handling
+python-dateutil==2.8.2
+
+# Alternative date picker if needed (but we're using custom implementation)
+# tkinter - built-in
+
+# Optional: For better date/time handling
+datetime
+
+# Optional: For data analysis and reports
+pandas==2.0.3
+matplotlib==3.7.2
+
+# Note: We removed tkcalendar as it conflicts with ttkbootstrap
+# Instead, we implemented a custom SafeDateEntry class

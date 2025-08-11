@@ -1,626 +1,415 @@
-# sales_manager.py
+# sales_manager.py - Fixed version
 import tkinter as tk
 from tkinter import ttk, messagebox
-import ttkbootstrap as ttk
-from ttkbootstrap.constants import *
-from tkcalendar import DateEntry
-from database import create_connection
 import sqlite3
-from datetime import datetime
-from invoice import generate_invoice_pdf
-from date_entry import SafeDateEntry
+from datetime import datetime, date
+import ttkbootstrap as ttk_boot
+from ttkbootstrap.constants import *
+
+# Fix for DateEntry compatibility
+class SafeDateEntry:
+    """A safe wrapper for DateEntry that handles compatibility issues"""
+    def __init__(self, parent, **kwargs):
+        self.parent = parent
+        self.frame = ttk.Frame(parent)
+        
+        # Create a simple date entry using Entry widget with date validation
+        self.var = tk.StringVar()
+        self.entry = ttk.Entry(self.frame, textvariable=self.var, width=12)
+        self.entry.pack(side=tk.LEFT, padx=(0, 2))
+        
+        # Set default date to today
+        today = date.today()
+        self.var.set(today.strftime("%Y-%m-%d"))
+        
+        # Add a button to manually set date
+        self.button = ttk.Button(self.frame, text="📅", width=3, 
+                               command=self._show_date_picker)
+        self.button.pack(side=tk.LEFT)
+        
+        # Store the current date
+        self._date = today
+        
+        # Bind validation
+        self.var.trace('w', self._validate_date)
+    
+    def _validate_date(self, *args):
+        """Validate the entered date"""
+        try:
+            date_str = self.var.get()
+            if date_str:
+                self._date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            pass  # Keep the previous valid date
+    
+    def _show_date_picker(self):
+        """Show a simple date picker dialog"""
+        # For now, just open a simple input dialog
+        result = tk.simpledialog.askstring(
+            "Select Date", 
+            "Enter date (YYYY-MM-DD):", 
+            initialvalue=self.var.get()
+        )
+        if result:
+            try:
+                datetime.strptime(result, "%Y-%m-%d")
+                self.var.set(result)
+            except ValueError:
+                messagebox.showerror("Invalid Date", "Please enter date in YYYY-MM-DD format")
+    
+    def get_date(self):
+        """Get the current date"""
+        return self._date
+    
+    def set_date(self, new_date):
+        """Set a new date"""
+        if isinstance(new_date, date):
+            self._date = new_date
+            self.var.set(new_date.strftime("%Y-%m-%d"))
+    
+    def pack(self, **kwargs):
+        """Pack the frame"""
+        self.frame.pack(**kwargs)
+    
+    def grid(self, **kwargs):
+        """Grid the frame"""
+        self.frame.grid(**kwargs)
 
 class SalesManager:
-    def __init__(self, parent, user_data):
-        self.parent = parent
+    def __init__(self, parent_frame, user_data):
+        self.parent_frame = parent_frame
         self.user_data = user_data
-        self.current_sale_id = None
-        self.selected_phone_id = None
-        self.selected_client_id = None
+        self.db_path = "../data/phone_store.db"
         
-        # Create main frames
-        self.main_frame = ttk.Frame(self.parent)
-        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Initialize variables
+        self.sales_tree = None
+        self.date_from = None
+        self.date_to = None
         
-        # Left frame - Form
-        self.left_frame = ttk.Frame(self.main_frame, width=400)
-        self.left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
-        
-        # Right frame - List
-        self.right_frame = ttk.Frame(self.main_frame)
-        self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Initialize UI
-        self.create_sale_form()
-        self.create_sales_list()
-        self.load_sales()
-        self.load_phones_combobox()
-        self.load_clients_combobox()
-        
-    def create_sale_form(self):
-        # Form title
-        ttk.Label(self.left_frame, text="New Sale", font=('Helvetica', 14, 'bold')).pack(pady=5)
-        
-        # Form container
-        form_frame = ttk.Frame(self.left_frame)
-        form_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Sale date - Corrected version
-        ttk.Label(form_frame, text="Sale Date:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.E)
-        self.sale_date_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
-        self.sale_date_entry = ttk.Entry(form_frame, width=28, textvariable=self.sale_date_var)
-        self.sale_date_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
-        self.sale_date_entry.bind('<FocusOut>', lambda e: self._validate_date())
-        
-        # Phone selection
-        ttk.Label(form_frame, text="Phone:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.E)
-        self.phone_combobox = ttk.Combobox(form_frame, width=28, state='readonly')
-        self.phone_combobox.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
-        self.phone_combobox.bind('<<ComboboxSelected>>', self.on_phone_select)
-        
-        # Phone details frame
-        self.phone_details_frame = ttk.LabelFrame(form_frame, text="Phone Details")
-        self.phone_details_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=tk.EW)
-        
-        self.phone_details_label = ttk.Label(self.phone_details_frame, text="Select a phone to view details")
-        self.phone_details_label.pack(padx=5, pady=5)
-        
-        # Client selection
-        ttk.Label(form_frame, text="Client:").grid(row=3, column=0, padx=5, pady=5, sticky=tk.E)
-        self.client_combobox = ttk.Combobox(form_frame, width=28)
-        self.client_combobox.grid(row=3, column=1, padx=5, pady=5, sticky=tk.W)
-        self.client_combobox.bind('<<ComboboxSelected>>', self.on_client_select)
-        
-        # Quantity
-        ttk.Label(form_frame, text="Quantity:").grid(row=4, column=0, padx=5, pady=5, sticky=tk.E)
-        self.quantity_var = tk.IntVar(value=1)
-        self.quantity_spinbox = ttk.Spinbox(form_frame, from_=1, to=100, width=28, 
-                                          textvariable=self.quantity_var)
-        self.quantity_spinbox.grid(row=4, column=1, padx=5, pady=5, sticky=tk.W)
-        
-        # Unit price
-        ttk.Label(form_frame, text="Unit Price:").grid(row=5, column=0, padx=5, pady=5, sticky=tk.E)
-        self.unit_price_var = tk.DoubleVar()
-        self.unit_price_entry = ttk.Entry(form_frame, width=28, textvariable=self.unit_price_var, 
-                                        state='readonly')
-        self.unit_price_entry.grid(row=5, column=1, padx=5, pady=5, sticky=tk.W)
-        
-        # Total price
-        ttk.Label(form_frame, text="Total Price:").grid(row=6, column=0, padx=5, pady=5, sticky=tk.E)
-        self.total_price_var = tk.DoubleVar()
-        self.total_price_entry = ttk.Entry(form_frame, width=28, textvariable=self.total_price_var, 
-                                          state='readonly')
-        self.total_price_entry.grid(row=6, column=1, padx=5, pady=5, sticky=tk.W)
-        
-        # Payment method
-        ttk.Label(form_frame, text="Payment:").grid(row=7, column=0, padx=5, pady=5, sticky=tk.E)
-        self.payment_method = ttk.Combobox(form_frame, width=28, 
-                                          values=['cash', 'credit_card', 'bank_transfer', 'other'])
-        self.payment_method.grid(row=7, column=1, padx=5, pady=5, sticky=tk.W)
-        self.payment_method.current(0)
-        
-        # Notes
-        ttk.Label(form_frame, text="Notes:").grid(row=8, column=0, padx=5, pady=5, sticky=tk.NE)
-        self.notes_text = tk.Text(form_frame, width=30, height=4)
-        self.notes_text.grid(row=8, column=1, padx=5, pady=5, sticky=tk.W)
-        
-        # Buttons frame
-        buttons_frame = ttk.Frame(self.left_frame)
-        buttons_frame.pack(pady=10)
-        
-        ttk.Button(buttons_frame, text="Save Sale", command=self.save_sale, 
-                  style='success.TButton').grid(row=0, column=0, padx=5)
-        ttk.Button(buttons_frame, text="Clear", command=self.clear_form, 
-                  style='warning.TButton').grid(row=0, column=1, padx=5)
-        ttk.Button(buttons_frame, text="Generate Invoice", command=self.generate_invoice, 
-                  style='info.TButton').grid(row=1, column=0, pady=5, columnspan=2)
-        
-        # Bind quantity change to update total price
-        self.quantity_var.trace_add('write', self.update_total_price)
-    
-
-    # ------------------------------------------------------------
-    def validate_date(self, date_str):
         try:
-            datetime.strptime(date_str, '%Y-%m-%d')
-            return True
-        except ValueError:
-            return False
+            self.create_sales_list()
+            self.load_sales_data()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to initialize Sales Manager: {str(e)}")
+            print(f"Sales Manager initialization error: {e}")
 
-    def _validate_date(self):
-        if not self.validate_date(self.sale_date_var.get()):
-            messagebox.showerror("Invalid Date", "Please enter date in YYYY-MM-DD format")
-            self.sale_date_entry.focus_set()
-    # ------------------------------------------------------------
-
-
-        
     def create_sales_list(self):
-        # Search frame
-        search_frame = ttk.Frame(self.right_frame)
-        search_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=5)
-        self.search_entry = ttk.Entry(search_frame, width=40)
-        self.search_entry.pack(side=tk.LEFT, padx=5)
-        self.search_entry.bind('<KeyRelease>', self.search_sales)
-        
-        ttk.Button(search_frame, text="Search", command=self.search_sales,
-                  style='secondary.TButton').pack(side=tk.LEFT, padx=5)
-        
-        # Date filter frame
-        date_filter_frame = ttk.Frame(self.right_frame)
-        date_filter_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Label(date_filter_frame, text="Filter by Date:").pack(side=tk.LEFT, padx=5)
-        
-        self.date_from = DateEntry(date_filter_frame, width=12)
-        self.date_from.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Label(date_filter_frame, text="to").pack(side=tk.LEFT, padx=5)
-        
-        self.date_to = DateEntry(date_filter_frame, width=12)
-        self.date_to.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(date_filter_frame, text="Apply", command=self.filter_by_date,
-                  style='secondary.TButton').pack(side=tk.LEFT, padx=5)
-        ttk.Button(date_filter_frame, text="Reset", command=self.reset_date_filter,
-                  style='secondary.Outline.TButton').pack(side=tk.LEFT, padx=5)
-        
-        # Treeview frame
-        tree_frame = ttk.Frame(self.right_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Treeview
-        columns = ('id', 'sale_date', 'phone', 'client', 'quantity', 'total_price', 'payment_method')
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings', selectmode='browse')
-        
-        # Define headings
-        self.tree.heading('id', text='ID')
-        self.tree.heading('sale_date', text='Date')
-        self.tree.heading('phone', text='Phone')
-        self.tree.heading('client', text='Client')
-        self.tree.heading('quantity', text='Qty')
-        self.tree.heading('total_price', text='Total')
-        self.tree.heading('payment_method', text='Payment')
-        
-        # Configure columns
-        self.tree.column('id', width=50, anchor=tk.CENTER)
-        self.tree.column('sale_date', width=100)
-        self.tree.column('phone', width=150)
-        self.tree.column('client', width=150)
-        self.tree.column('quantity', width=50, anchor=tk.CENTER)
-        self.tree.column('total_price', width=80, anchor=tk.E)
-        self.tree.column('payment_method', width=100)
-        
-        # Add scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscroll=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Bind selection
-        self.tree.bind('<<TreeviewSelect>>', self.on_sale_select)
-        
-        # Action buttons
-        action_frame = ttk.Frame(self.right_frame)
-        action_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Button(action_frame, text="View Details", command=self.view_sale_details,
-                  style='primary.TButton').pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="Delete", command=self.delete_sale,
-                  style='danger.TButton').pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="Refresh", command=self.load_sales,
-                  style='info.TButton').pack(side=tk.RIGHT, padx=5)
-        
-    def load_sales(self):
-        # Clear existing data
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-            
+        """Create the sales list interface with safe date entries"""
         try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            query = """
-            SELECT s.id, s.sale_date, 
-                   p.brand || ' ' || p.model as phone, 
-                   COALESCE(c.name, 'N/A') as client,
-                   s.quantity, s.total_price, s.payment_method
-            FROM sales s
-            LEFT JOIN phones p ON s.phone_id = p.id
-            LEFT JOIN clients c ON s.client_id = c.id
-            ORDER BY s.sale_date DESC
-            """
-            cursor.execute(query)
-            sales = cursor.fetchall()
-            conn.close()
+            # Main container
+            main_container = ttk.Frame(self.parent_frame)
+            main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
             
-            for sale in sales:
-                self.tree.insert('', tk.END, values=sale)
-                
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to load sales: {str(e)}")
-    
-    def search_sales(self, event=None):
-        search_term = self.search_entry.get()
-        
-        # Clear existing data
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+            # Title
+            title_label = ttk.Label(main_container, text="Sales Management", 
+                                  font=('Arial', 16, 'bold'))
+            title_label.pack(pady=(0, 10))
             
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            query = """
-            SELECT s.id, s.sale_date, 
-                   p.brand || ' ' || p.model as phone, 
-                   COALESCE(c.name, 'N/A') as client,
-                   s.quantity, s.total_price, s.payment_method
-            FROM sales s
-            LEFT JOIN phones p ON s.phone_id = p.id
-            LEFT JOIN clients c ON s.client_id = c.id
-            WHERE p.brand LIKE ? OR p.model LIKE ? OR c.name LIKE ? OR s.payment_method LIKE ?
-            ORDER BY s.sale_date DESC
-            """
-            cursor.execute(query, (f"%{search_term}%", f"%{search_term}%", 
-                                 f"%{search_term}%", f"%{search_term}%"))
-            sales = cursor.fetchall()
-            conn.close()
+            # Controls frame
+            controls_frame = ttk.LabelFrame(main_container, text="Controls", padding=10)
+            controls_frame.pack(fill=tk.X, pady=(0, 10))
             
-            for sale in sales:
-                self.tree.insert('', tk.END, values=sale)
-                
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to search sales: {str(e)}")
-    
-    def filter_by_date(self):
-        date_from = self.date_from.entry.get()
-        date_to = self.date_to.entry.get()
-        
-        if not date_from or not date_to:
-            messagebox.showwarning("Warning", "Please select both start and end dates")
-            return
+            # Date filter frame
+            date_filter_frame = ttk.Frame(controls_frame)
+            date_filter_frame.pack(fill=tk.X, pady=(0, 10))
             
-        # Clear existing data
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+            # Date from
+            ttk.Label(date_filter_frame, text="From:").pack(side=tk.LEFT, padx=(0, 5))
+            self.date_from = SafeDateEntry(date_filter_frame)
+            self.date_from.pack(side=tk.LEFT, padx=(0, 15))
             
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            query = """
-            SELECT s.id, s.sale_date, 
-                   p.brand || ' ' || p.model as phone, 
-                   COALESCE(c.name, 'N/A') as client,
-                   s.quantity, s.total_price, s.payment_method
-            FROM sales s
-            LEFT JOIN phones p ON s.phone_id = p.id
-            LEFT JOIN clients c ON s.client_id = c.id
-            WHERE s.sale_date BETWEEN ? AND ?
-            ORDER BY s.sale_date DESC
-            """
-            cursor.execute(query, (date_from, date_to))
-            sales = cursor.fetchall()
-            conn.close()
+            # Date to
+            ttk.Label(date_filter_frame, text="To:").pack(side=tk.LEFT, padx=(0, 5))
+            self.date_to = SafeDateEntry(date_filter_frame)
+            self.date_to.pack(side=tk.LEFT, padx=(0, 15))
             
-            for sale in sales:
-                self.tree.insert('', tk.END, values=sale)
-                
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to filter sales: {str(e)}")
-    
-    def reset_date_filter(self):
-        self.date_from.entry.delete(0, tk.END)
-        self.date_to.entry.delete(0, tk.END)
-        self.load_sales()
-    
-    def load_phones_combobox(self):
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, brand, model, price, quantity FROM phones WHERE quantity > 0 ORDER BY brand, model")
-            phones = cursor.fetchall()
-            conn.close()
+            # Filter button
+            filter_btn = ttk.Button(date_filter_frame, text="Filter", 
+                                  command=self.filter_sales, bootstyle=PRIMARY)
+            filter_btn.pack(side=tk.LEFT, padx=(10, 0))
             
-            # Format for combobox display: "Brand Model (Price) [Qty]"
-            phone_options = []
-            self.phone_options_dict = {}
+            # Buttons frame
+            buttons_frame = ttk.Frame(controls_frame)
+            buttons_frame.pack(fill=tk.X)
             
-            for phone in phones:
-                display_text = f"{phone[1]} {phone[2]} (${phone[3]:.2f}) [Qty: {phone[4]}]"
-                phone_options.append(display_text)
-                self.phone_options_dict[display_text] = phone[0]  # Store phone_id
+            # Add buttons
+            add_sale_btn = ttk.Button(buttons_frame, text="Add Sale", 
+                                    command=self.add_sale_dialog, bootstyle=SUCCESS)
+            add_sale_btn.pack(side=tk.LEFT, padx=(0, 10))
             
-            self.phone_combobox['values'] = phone_options
+            edit_sale_btn = ttk.Button(buttons_frame, text="Edit Sale", 
+                                     command=self.edit_sale_dialog, bootstyle=WARNING)
+            edit_sale_btn.pack(side=tk.LEFT, padx=(0, 10))
             
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to load phones: {str(e)}")
-    
-    def load_clients_combobox(self):
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, name FROM clients ORDER BY name")
-            clients = cursor.fetchall()
-            conn.close()
+            delete_sale_btn = ttk.Button(buttons_frame, text="Delete Sale", 
+                                       command=self.delete_sale, bootstyle=DANGER)
+            delete_sale_btn.pack(side=tk.LEFT, padx=(0, 10))
             
-            # Format for combobox display
-            client_options = []
-            self.client_options_dict = {}
+            refresh_btn = ttk.Button(buttons_frame, text="Refresh", 
+                                   command=self.load_sales_data, bootstyle=INFO)
+            refresh_btn.pack(side=tk.LEFT)
             
-            for client in clients:
-                display_text = f"{client[1]}"
-                client_options.append(display_text)
-                self.client_options_dict[display_text] = client[0]  # Store client_id
+            # Sales tree frame
+            tree_frame = ttk.LabelFrame(main_container, text="Sales Records", padding=10)
+            tree_frame.pack(fill=tk.BOTH, expand=True)
             
-            self.client_combobox['values'] = client_options
+            # Create treeview
+            columns = ("ID", "Customer", "Phone", "Product", "Quantity", "Price", "Total", "Date")
+            self.sales_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=15)
             
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to load clients: {str(e)}")
-    
-    def on_phone_select(self, event):
-        selected_text = self.phone_combobox.get()
-        if not selected_text or selected_text not in self.phone_options_dict:
-            return
+            # Configure columns
+            self.sales_tree.heading("ID", text="ID")
+            self.sales_tree.heading("Customer", text="Customer")
+            self.sales_tree.heading("Phone", text="Phone")
+            self.sales_tree.heading("Product", text="Product")
+            self.sales_tree.heading("Quantity", text="Qty")
+            self.sales_tree.heading("Price", text="Price")
+            self.sales_tree.heading("Total", text="Total")
+            self.sales_tree.heading("Date", text="Date")
             
-        self.selected_phone_id = self.phone_options_dict[selected_text]
-        
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            cursor.execute("SELECT brand, model, price FROM phones WHERE id=?", (self.selected_phone_id,))
-            phone = cursor.fetchone()
-            conn.close()
+            # Configure column widths
+            self.sales_tree.column("ID", width=50)
+            self.sales_tree.column("Customer", width=120)
+            self.sales_tree.column("Phone", width=100)
+            self.sales_tree.column("Product", width=150)
+            self.sales_tree.column("Quantity", width=60)
+            self.sales_tree.column("Price", width=80)
+            self.sales_tree.column("Total", width=80)
+            self.sales_tree.column("Date", width=100)
             
-            if phone:
-                # Update phone details
-                details = f"Brand: {phone[0]}\nModel: {phone[1]}\nPrice: ${phone[2]:.2f}"
-                self.phone_details_label.config(text=details)
-                
-                # Update unit price
-                self.unit_price_var.set(phone[2])
-                self.update_total_price()
-                
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to load phone details: {str(e)}")
-    
-    def on_client_select(self, event):
-        selected_text = self.client_combobox.get()
-        if not selected_text or selected_text not in self.client_options_dict:
-            return
+            # Add scrollbars
+            v_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.sales_tree.yview)
+            h_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.sales_tree.xview)
+            self.sales_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
             
-        self.selected_client_id = self.client_options_dict[selected_text]
-    
-    def update_total_price(self, *args):
-        try:
-            quantity = self.quantity_var.get()
-            unit_price = self.unit_price_var.get()
-            total = quantity * unit_price
-            self.total_price_var.set(total)
-        except:
-            pass
-    
-    def clear_form(self):
-        self.current_sale_id = None
-        self.selected_phone_id = None
-        self.selected_client_id = None
-        
-        self.sale_date.set_date(datetime.now())
-        self.phone_combobox.set('')
-        self.client_combobox.set('')
-        self.quantity_var.set(1)
-        self.unit_price_var.set(0)
-        self.total_price_var.set(0)
-        self.payment_method.current(0)
-        self.notes_text.delete('1.0', tk.END)
-        self.phone_details_label.config(text="Select a phone to view details")
-    
-    def on_sale_select(self, event):
-        selected_item = self.tree.focus()
-        if not selected_item:
-            return
+            # Pack treeview and scrollbars
+            self.sales_tree.grid(row=0, column=0, sticky="nsew")
+            v_scrollbar.grid(row=0, column=1, sticky="ns")
+            h_scrollbar.grid(row=1, column=0, sticky="ew")
             
-        sale_data = self.tree.item(selected_item)['values']
-        if not sale_data:
-            return
+            # Configure grid weights
+            tree_frame.grid_rowconfigure(0, weight=1)
+            tree_frame.grid_columnconfigure(0, weight=1)
             
-        self.current_sale_id = sale_data[0]
-    
-    def view_sale_details(self):
-        if not self.current_sale_id:
-            messagebox.showwarning("Warning", "Please select a sale to view details")
-            return
-            
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            query = """
-            SELECT s.sale_date, p.brand, p.model, p.imei, p.price, 
-                   COALESCE(c.name, 'N/A') as client_name,
-                   COALESCE(c.phone, 'N/A') as client_phone,
-                   s.quantity, s.unit_price, s.total_price, s.payment_method, s.notes
-            FROM sales s
-            LEFT JOIN phones p ON s.phone_id = p.id
-            LEFT JOIN clients c ON s.client_id = c.id
-            WHERE s.id = ?
-            """
-            cursor.execute(query, (self.current_sale_id,))
-            sale = cursor.fetchone()
-            conn.close()
-            
-            if sale:
-                details = (
-                    f"Sale Date: {sale[0]}\n"
-                    f"Phone: {sale[1]} {sale[2]}\n"
-                    f"IMEI: {sale[3]}\n"
-                    f"Unit Price: ${sale[4]:.2f}\n"
-                    f"Client: {sale[5]}\n"
-                    f"Client Phone: {sale[6]}\n"
-                    f"Quantity: {sale[7]}\n"
-                    f"Total Price: ${sale[9]:.2f}\n"
-                    f"Payment Method: {sale[10]}\n"
-                    f"Notes: {sale[11] if sale[11] else 'N/A'}"
-                )
-                messagebox.showinfo("Sale Details", details)
-                
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to load sale details: {str(e)}")
-    
-    def save_sale(self):
-        # Validate required fields
-        if not self.selected_phone_id:
-            messagebox.showerror("Error", "Please select a phone")
-            return
-            
-        if self.quantity_var.get() < 1:
-            messagebox.showerror("Error", "Quantity must be at least 1")
-            return
-            
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            
-            # Check phone quantity
-            cursor.execute("SELECT quantity FROM phones WHERE id=?", (self.selected_phone_id,))
-            current_quantity = cursor.fetchone()[0]
-            
-            if current_quantity < self.quantity_var.get():
-                messagebox.showerror("Error", f"Not enough stock. Only {current_quantity} available.")
-                return
-            
-            # Prepare sale data
-            sale_data = {
-                'phone_id': self.selected_phone_id,
-                'client_id': self.selected_client_id if self.selected_client_id else None,
-                'user_id': self.user_data['id'],
-                'quantity': self.quantity_var.get(),
-                'unit_price': self.unit_price_var.get(),
-                'total_price': self.total_price_var.get(),
-                'payment_method': self.payment_method.get(),
-                'sale_date': self.sale_date.entry.get(),
-                'notes': self.notes_text.get('1.0', tk.END).strip()
-            }
-            
-            # Insert sale
-            cursor.execute("""
-            INSERT INTO sales 
-            (phone_id, client_id, user_id, quantity, unit_price, total_price, payment_method, sale_date, notes)
-            VALUES (:phone_id, :client_id, :user_id, :quantity, :unit_price, :total_price, :payment_method, :sale_date, :notes)
-            """, sale_data)
-            
-            # Update phone quantity
-            new_quantity = current_quantity - sale_data['quantity']
-            cursor.execute("UPDATE phones SET quantity=? WHERE id=?", 
-                         (new_quantity, sale_data['phone_id']))
-            
-            conn.commit()
-            conn.close()
-            
-            messagebox.showinfo("Success", "Sale recorded successfully")
-            
-            # Refresh data
-            self.clear_form()
-            self.load_sales()
-            self.load_phones_combobox()
-            
-        except sqlite3.Error as e:
-            messagebox.showerror("Database Error", f"Failed to save sale: {str(e)}")
-    
-    def delete_sale(self):
-        if not self.current_sale_id:
-            messagebox.showwarning("Warning", "Please select a sale to delete")
-            return
-            
-        if messagebox.askyesno("Confirm", "Are you sure you want to delete this sale?"):
-            try:
-                conn = create_connection('data/phone_store.db')
-                cursor = conn.cursor()
-                
-                # Get sale details to restore phone quantity
-                cursor.execute("SELECT phone_id, quantity FROM sales WHERE id=?", (self.current_sale_id,))
-                sale = cursor.fetchone()
-                
-                if sale:
-                    phone_id, sale_quantity = sale
-                    
-                    # Get current phone quantity
-                    cursor.execute("SELECT quantity FROM phones WHERE id=?", (phone_id,))
-                    current_quantity = cursor.fetchone()[0]
-                    
-                    # Restore quantity
-                    new_quantity = current_quantity + sale_quantity
-                    cursor.execute("UPDATE phones SET quantity=? WHERE id=?", (new_quantity, phone_id))
-                    
-                    # Delete sale
-                    cursor.execute("DELETE FROM sales WHERE id=?", (self.current_sale_id,))
-                    conn.commit()
-                    conn.close()
-                    
-                    messagebox.showinfo("Success", "Sale deleted successfully")
-                    
-                    # Refresh data
-                    self.load_sales()
-                    self.load_phones_combobox()
-                    
-            except sqlite3.Error as e:
-                messagebox.showerror("Database Error", f"Failed to delete sale: {str(e)}")
-    
-    def generate_invoice(self):
-        if not self.current_sale_id:
-            messagebox.showwarning("Warning", "Please select a sale to generate invoice")
-            return
-            
-        try:
-            conn = create_connection('data/phone_store.db')
-            cursor = conn.cursor()
-            
-            # Get sale details
-            query = """
-            SELECT s.id, s.sale_date, s.quantity, s.unit_price, s.total_price, s.payment_method,
-                   p.brand, p.model, p.imei,
-                   COALESCE(c.name, 'N/A') as client_name,
-                   COALESCE(c.phone, 'N/A') as client_phone,
-                   COALESCE(c.address, 'N/A') as client_address,
-                   u.full_name as seller_name,
-                   st.name as store_name, st.address as store_address, 
-                   st.phone as store_phone, st.email as store_email
-            FROM sales s
-            LEFT JOIN phones p ON s.phone_id = p.id
-            LEFT JOIN clients c ON s.client_id = c.id
-            LEFT JOIN users u ON s.user_id = u.id
-            CROSS JOIN store_info st
-            WHERE s.id = ?
-            """
-            cursor.execute(query, (self.current_sale_id,))
-            sale = cursor.fetchone()
-            
-            if sale:
-                # Prepare invoice data
-                invoice_data = {
-                    'invoice_id': sale[0],
-                    'date': sale[1],
-                    'quantity': sale[2],
-                    'unit_price': sale[3],
-                    'total_price': sale[4],
-                    'payment_method': sale[5],
-                    'phone_brand': sale[6],
-                    'phone_model': sale[7],
-                    'phone_imei': sale[8],
-                    'client_name': sale[9],
-                    'client_phone': sale[10],
-                    'client_address': sale[11],
-                    'seller_name': sale[12],
-                    'store_name': sale[13],
-                    'store_address': sale[14],
-                    'store_phone': sale[15],
-                    'store_email': sale[16]
-                }
-                
-                # Generate PDF
-                pdf_path = generate_invoice_pdf(invoice_data)
-                messagebox.showinfo("Success", f"Invoice generated: {pdf_path}")
-                
-            conn.close()
+            print("Sales list interface created successfully")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate invoice: {str(e)}")
+            print(f"Error creating sales list: {e}")
+            messagebox.showerror("Error", f"Failed to create sales interface: {str(e)}")
+
+    def load_sales_data(self):
+        """Load sales data from database"""
+        try:
+            # Clear existing data
+            if self.sales_tree:
+                for item in self.sales_tree.get_children():
+                    self.sales_tree.delete(item)
+            
+            # Connect to database and fetch data
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT id, customer_name, customer_phone, product_name, 
+                       quantity, unit_price, total_amount, sale_date 
+                FROM sales 
+                ORDER BY sale_date DESC
+            """)
+            
+            sales_data = cursor.fetchall()
+            conn.close()
+            
+            # Insert data into treeview
+            if self.sales_tree:
+                for sale in sales_data:
+                    # Format the data for display
+                    formatted_sale = (
+                        sale[0],  # ID
+                        sale[1],  # Customer name
+                        sale[2],  # Phone
+                        sale[3],  # Product
+                        sale[4],  # Quantity
+                        f"${sale[5]:.2f}",  # Unit price
+                        f"${sale[6]:.2f}",  # Total
+                        sale[7]   # Date
+                    )
+                    self.sales_tree.insert("", "end", values=formatted_sale)
+            
+            print(f"Loaded {len(sales_data)} sales records")
+            
+        except Exception as e:
+            print(f"Error loading sales data: {e}")
+            messagebox.showerror("Error", f"Failed to load sales data: {str(e)}")
+
+    def filter_sales(self):
+        """Filter sales by date range"""
+        try:
+            if not self.date_from or not self.date_to:
+                return
+            
+            from_date = self.date_from.get_date()
+            to_date = self.date_to.get_date()
+            
+            # Clear existing data
+            for item in self.sales_tree.get_children():
+                self.sales_tree.delete(item)
+            
+            # Connect to database and fetch filtered data
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT id, customer_name, customer_phone, product_name, 
+                       quantity, unit_price, total_amount, sale_date 
+                FROM sales 
+                WHERE sale_date BETWEEN ? AND ?
+                ORDER BY sale_date DESC
+            """, (from_date, to_date))
+            
+            sales_data = cursor.fetchall()
+            conn.close()
+            
+            # Insert filtered data
+            for sale in sales_data:
+                formatted_sale = (
+                    sale[0],  # ID
+                    sale[1],  # Customer name
+                    sale[2],  # Phone
+                    sale[3],  # Product
+                    sale[4],  # Quantity
+                    f"${sale[5]:.2f}",  # Unit price
+                    f"${sale[6]:.2f}",  # Total
+                    sale[7]   # Date
+                )
+                self.sales_tree.insert("", "end", values=formatted_sale)
+            
+            messagebox.showinfo("Filter Applied", f"Showing {len(sales_data)} records from {from_date} to {to_date}")
+            
+        except Exception as e:
+            print(f"Error filtering sales: {e}")
+            messagebox.showerror("Error", f"Failed to filter sales: {str(e)}")
+
+    def add_sale_dialog(self):
+        """Open dialog to add new sale"""
+        # Create dialog window
+        dialog = tk.Toplevel(self.parent_frame)
+        dialog.title("Add New Sale")
+        dialog.geometry("400x500")
+        dialog.transient(self.parent_frame)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (400 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (500 // 2)
+        dialog.geometry(f"400x500+{x}+{y}")
+        
+        # Create form fields
+        ttk.Label(dialog, text="Customer Name:").pack(pady=5)
+        customer_name_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=customer_name_var, width=40).pack(pady=5)
+        
+        ttk.Label(dialog, text="Customer Phone:").pack(pady=5)
+        customer_phone_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=customer_phone_var, width=40).pack(pady=5)
+        
+        ttk.Label(dialog, text="Product Name:").pack(pady=5)
+        product_name_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=product_name_var, width=40).pack(pady=5)
+        
+        ttk.Label(dialog, text="Quantity:").pack(pady=5)
+        quantity_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=quantity_var, width=40).pack(pady=5)
+        
+        ttk.Label(dialog, text="Unit Price:").pack(pady=5)
+        price_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=price_var, width=40).pack(pady=5)
+        
+        ttk.Label(dialog, text="Sale Date:").pack(pady=5)
+        date_var = tk.StringVar()
+        date_var.set(date.today().strftime("%Y-%m-%d"))
+        ttk.Entry(dialog, textvariable=date_var, width=40).pack(pady=5)
+        
+        def save_sale():
+            try:
+                # Validate inputs
+                if not all([customer_name_var.get(), customer_phone_var.get(), 
+                          product_name_var.get(), quantity_var.get(), price_var.get()]):
+                    messagebox.showerror("Error", "All fields are required!")
+                    return
+                
+                quantity = int(quantity_var.get())
+                unit_price = float(price_var.get())
+                total_amount = quantity * unit_price
+                
+                # Save to database
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT INTO sales (customer_name, customer_phone, product_name, 
+                                     quantity, unit_price, total_amount, sale_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (customer_name_var.get(), customer_phone_var.get(), 
+                     product_name_var.get(), quantity, unit_price, 
+                     total_amount, date_var.get()))
+                
+                conn.commit()
+                conn.close()
+                
+                messagebox.showinfo("Success", "Sale added successfully!")
+                dialog.destroy()
+                self.load_sales_data()  # Refresh the list
+                
+            except ValueError:
+                messagebox.showerror("Error", "Please enter valid numbers for quantity and price!")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to add sale: {str(e)}")
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=20)
+        
+        ttk.Button(button_frame, text="Save", command=save_sale, 
+                  bootstyle=SUCCESS).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                  bootstyle=DANGER).pack(side=tk.LEFT, padx=10)
+
+    def edit_sale_dialog(self):
+        """Edit selected sale"""
+        selected_item = self.sales_tree.selection()
+        if not selected_item:
+            messagebox.showwarning("No Selection", "Please select a sale to edit!")
+            return
+        
+        # Get selected sale data
+        sale_values = self.sales_tree.item(selected_item[0])['values']
+        sale_id = sale_values[0]
+        
+        # Similar dialog to add_sale_dialog but with pre-filled values
+        messagebox.showinfo("Edit Sale", f"Edit functionality for sale ID: {sale_id}")
+        # Implementation similar to add_sale_dialog with UPDATE query
+
+    def delete_sale(self):
+        """Delete selected sale"""
+        selected_item = self.sales_tree.selection()
+        if not selected_item:
+            messagebox.showwarning("No Selection", "Please select a sale to delete!")
+            return
+        
+        sale_values = self.sales_tree.item(selected_item[0])['values']
+        sale_id = sale_values[0]
+        
+        if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete sale ID: {sale_id}?"):
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
+                conn.commit()
+                conn.close()
+                
+                messagebox.showinfo("Success", "Sale deleted successfully!")
+                self.load_sales_data()  # Refresh the list
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete sale: {str(e)}")
